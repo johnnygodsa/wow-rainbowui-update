@@ -8,6 +8,7 @@ using System.Security.Authentication;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
+using System.Threading;
 using System.Windows.Forms;
 using System.Collections.Generic;
 using System.Drawing;
@@ -39,7 +40,7 @@ namespace InstallerWinForms
             Text = strings.Title;
             StartPosition = FormStartPosition.CenterScreen;
             Width = 740;
-            Height = 600;
+            Height = 650;
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;
 
@@ -47,15 +48,18 @@ namespace InstallerWinForms
             var pathLabel = new Label { Text = strings.WowPath, Left = 10, Top = 10, AutoSize = true };
             pathBox = new TextBox { Left = 10, Top = 30, Width = 440, ReadOnly = true, Text = config.WowPath ?? "" };
             selectButton = new Button { Text = strings.Select, Left = 460, Top = 30, Width = 100, Height = pathBox.Height };
-            statusLabel = new Label { Left = 10, Top = 70, Width = 700, Text = "", TextAlign = ContentAlignment.MiddleCenter };
-            progressBar = new ProgressBar { Left = 10, Top = 100, Width = 700, Minimum = 0, Maximum = 100 };
-            downloadInfoLabel = new Label { Left = 10, Top = 130, Width = 700, Text = "", Visible = false, TextAlign = ContentAlignment.MiddleCenter };
+            statusLabel = new Label { Left = 10, Top = 85, Width = 700, Text = "", TextAlign = ContentAlignment.MiddleCenter };
+            progressBar = new ProgressBar { Left = 10, Top = 115, Width = 700, Minimum = 0, Maximum = 100 };
+            downloadInfoLabel = new Label { Left = 10, Top = 145, Width = 700, Text = "", Visible = false, TextAlign = ContentAlignment.MiddleCenter };
             var tokenCheckBox = new CheckBox { Text = strings.UseGitHubTokenLabel, Left = 570, Top = 32, Width = 150, Checked = !string.IsNullOrWhiteSpace(config.GitHubToken), ForeColor = !string.IsNullOrWhiteSpace(config.GitHubToken) ? Color.Green : Color.Black };
-            startButton = new Button { Text = strings.UpdateButtonChecking, Top = 250, Width = 100, Height = 32, Enabled = false };
-            componentsList = new ListView { Left = 10, Top = 290, Width = 700, Height = 240, View = View.Details, FullRowSelect = true, GridLines = true };
-            componentsList.Columns.Add(strings.ComponentsHeader, 420);
-            componentsList.Columns.Add(strings.StatusHeader, 250);
-            logList = new TextBox { Left = 10, Top = 160, Width = 700, Height = 80, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BackColor = Color.White, Font = new Font("Consolas", 9) };
+            var customDownloadCheckBox = new CheckBox { Text = "自定義下載方式", Left = 570, Top = 54, Width = 150, Checked = (config.ParallelDownloads != 3 || config.BufferSizeKB != 8 || config.ConnectionTimeout != 30), ForeColor = (config.ParallelDownloads != 3 || config.BufferSizeKB != 8 || config.ConnectionTimeout != 30) ? Color.Green : Color.Black };
+            startButton = new Button { Text = strings.UpdateButtonChecking, Top = 265, Width = 100, Height = 32, Enabled = false };
+            componentsList = new ListView { Left = 10, Top = 305, Width = 700, Height = 265, View = View.Details, FullRowSelect = true, GridLines = true };
+            componentsList.Columns.Add(strings.ComponentsHeader, 200);
+            componentsList.Columns.Add(strings.StatusHeader, 80);
+            componentsList.Columns.Add("更新時間", 160);
+            componentsList.Columns.Add("Commit 訊息", 240);
+            logList = new TextBox { Left = 10, Top = 175, Width = 700, Height = 80, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BackColor = Color.White, Font = new Font("Consolas", 9) };
 
             var f = statusLabel.Font;
             statusLabel.Font = new Font(f.FontFamily, f.Size * 1.5f, FontStyle.Bold);
@@ -87,6 +91,34 @@ namespace InstallerWinForms
             };
 
             
+            customDownloadCheckBox.CheckedChanged += (s, e) =>
+            {
+                if (customDownloadCheckBox.Checked)
+                {
+                    ShowCustomDownloadDialog(customDownloadCheckBox);
+                }
+                else
+                {
+                    var result = MessageBox.Show(
+                        "確定要恢復預設下載設定嗎？\n並行數：3\n緩衝區：8KB\n逾時：30秒",
+                        "確認",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Question);
+                    if (result == DialogResult.Yes)
+                    {
+                        config.ParallelDownloads = 3;
+                        config.BufferSizeKB = 8;
+                        config.ConnectionTimeout = 30;
+                        config.Save(Path.Combine(AppContext.BaseDirectory, "rainbow_config.json"));
+                        customDownloadCheckBox.ForeColor = Color.Black;
+                        Log("已恢復預設下載設定：並行 3、緩衝 8KB、逾時 30s");
+                    }
+                    else
+                    {
+                        customDownloadCheckBox.Checked = true;
+                    }
+                }
+            };
 
             // 選擇 WoW 安裝路徑（僅允許 Launcher.exe）
             selectButton.Click += (s, e) =>
@@ -132,6 +164,7 @@ namespace InstallerWinForms
             Controls.Add(progressBar);
             Controls.Add(downloadInfoLabel);
             Controls.Add(tokenCheckBox);
+            Controls.Add(customDownloadCheckBox);
             Controls.Add(startButton);
             Controls.Add(componentsList);
             Controls.Add(logList);
@@ -277,6 +310,29 @@ namespace InstallerWinForms
                     );
                     dialog.DialogResult = DialogResult.OK;
                     dialog.Close();
+                    // 自動使用 Token 重新連線並檢測更新
+                    Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await Task.Delay(500);
+                            this.Invoke(new Action(async () =>
+                            {
+                                statusLabel.ForeColor = Color.Blue;
+                                statusLabel.Text = "正在使用 Token 重新檢測更新...";
+                                startButton.Enabled = false;
+                                await RunInitialCheck();
+                                Log("✓ 已使用 Token 重新連線至 GitHub API");
+                            }));
+                        }
+                        catch (Exception ex)
+                        {
+                            this.Invoke(new Action(() =>
+                            {
+                                Log($"重新檢測失敗：{ex.Message}");
+                            }));
+                        }
+                    });
                 }
                 catch (Exception ex)
                 {
@@ -321,11 +377,116 @@ namespace InstallerWinForms
             dialog.ShowDialog(this);
         }
 
+        void ShowCustomDownloadDialog(CheckBox customCheckBox)
+        {
+            var dialog = new Form
+            {
+                Text = "自定義下載設定",
+                Width = 600,
+                Height = 520,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterParent,
+                MaximizeBox = false,
+                MinimizeBox = false
+            };
+
+            var titleLabel = new Label { Text = "⚙ 根據你的網路環境調整下載參數以獲得最佳效能", Left = 15, Top = 15, Width = 540, Height = 30, Font = new Font(Font, FontStyle.Bold), ForeColor = Color.DarkBlue };
+
+            var parallelLabel = new Label { Text = "並行下載資料夾數量：", Left = 15, Top = 60, Width = 150, AutoSize = true };
+            var parallelNumeric = new NumericUpDown { Left = 170, Top = 57, Width = 80, Minimum = 1, Maximum = 10, Value = config.ParallelDownloads };
+            var parallelHint = new Label { Text = "• 10Mbps 以下網路：建議 1-2\n• 10-50Mbps 網路：建議 2-3\n• 50-100Mbps 網路：建議 3-5\n• 100Mbps 以上網路：建議 5-8\n• 設定過高可能導致連線不穩或 API 限制", Left = 30, Top = 85, Width = 540, Height = 95, ForeColor = Color.Gray, Font = new Font(Font.FontFamily, 9.5f) };
+
+            var bufferLabel = new Label { Text = "下載緩衝區大小 (KB)：", Left = 15, Top = 180, Width = 150, AutoSize = true };
+            var bufferNumeric = new NumericUpDown { Left = 170, Top = 177, Width = 80, Minimum = 4, Maximum = 512, Value = config.BufferSizeKB, Increment = 4 };
+            var bufferHint = new Label { Text = "• 預設：8KB（適合大多數環境）\n• 網路穩定且快速：可調至 64-128KB\n• 網路不穩或延遲高：保持 8-16KB\n• 過大的緩衝區可能增加記憶體使用", Left = 30, Top = 205, Width = 540, Height = 70, ForeColor = Color.Gray, Font = new Font(Font.FontFamily, 9.5f) };
+
+            var timeoutLabel = new Label { Text = "連線逾時 (秒)：", Left = 15, Top = 290, Width = 150, AutoSize = true };
+            var timeoutNumeric = new NumericUpDown { Left = 170, Top = 287, Width = 80, Minimum = 10, Maximum = 120, Value = config.ConnectionTimeout, Increment = 5 };
+            var timeoutHint = new Label { Text = "• 預設：30 秒\n• 網路穩定：可縮短至 20 秒\n• 網路不穩或使用代理：延長至 60-90 秒", Left = 30, Top = 315, Width = 540, Height = 55, ForeColor = Color.Gray, Font = new Font(Font.FontFamily, 9.5f) };
+
+            var saveButton = new Button { Text = "儲存設定", Left = 330, Top = 430, Width = 100, Height = 35 };
+            var cancelButton = new Button { Text = "取消", Left = 445, Top = 430, Width = 100, Height = 35 };
+
+            saveButton.Click += (s, e) =>
+            {
+                var newParallel = (int)parallelNumeric.Value;
+                var newBuffer = (int)bufferNumeric.Value;
+                var newTimeout = (int)timeoutNumeric.Value;
+
+                config.ParallelDownloads = newParallel;
+                config.BufferSizeKB = newBuffer;
+                config.ConnectionTimeout = newTimeout;
+                config.Save(Path.Combine(AppContext.BaseDirectory, "rainbow_config.json"));
+
+                customCheckBox.Checked = true;
+                customCheckBox.ForeColor = Color.Green;
+
+                Log($"✓ 下載設定已更新：並行 {newParallel}、緩衝 {newBuffer}KB、逾時 {newTimeout}s");
+
+                MessageBox.Show(
+                    $"下載設定已儲存！\n\n並行下載數：{newParallel}\n緩衝區大小：{newBuffer} KB\n連線逾時：{newTimeout} 秒\n\n新設定將在下次下載時生效。",
+                    "設定已儲存",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+
+                dialog.DialogResult = DialogResult.OK;
+                dialog.Close();
+
+                Task.Run(async () =>
+                {
+                    try
+                    {
+                        await Task.Delay(500);
+                        this.Invoke(new Action(async () =>
+                        {
+                            statusLabel.ForeColor = Color.Blue;
+                            statusLabel.Text = "正在套用新的下載設定...";
+                            startButton.Enabled = false;
+                            await RunInitialCheck();
+                            Log("下載設定已套用，可以開始更新");
+                        }));
+                    }
+                    catch (Exception ex)
+                    {
+                        this.Invoke(new Action(() => Log(ex.Message)));
+                    }
+                });
+            };
+
+            cancelButton.Click += (s, e) =>
+            {
+                if (config.ParallelDownloads == 3 && config.BufferSizeKB == 8 && config.ConnectionTimeout == 30)
+                {
+                    customCheckBox.Checked = false;
+                    customCheckBox.ForeColor = Color.Black;
+                }
+                dialog.DialogResult = DialogResult.Cancel;
+                dialog.Close();
+            };
+
+            dialog.Controls.Add(titleLabel);
+            dialog.Controls.Add(parallelLabel);
+            dialog.Controls.Add(parallelNumeric);
+            dialog.Controls.Add(parallelHint);
+            dialog.Controls.Add(bufferLabel);
+            dialog.Controls.Add(bufferNumeric);
+            dialog.Controls.Add(bufferHint);
+            dialog.Controls.Add(timeoutLabel);
+            dialog.Controls.Add(timeoutNumeric);
+            dialog.Controls.Add(timeoutHint);
+            dialog.Controls.Add(saveButton);
+            dialog.Controls.Add(cancelButton);
+
+            dialog.ShowDialog(this);
+        }
+
         // 遠端 AddOns 資料夾資訊（名稱與樹狀 SHA）
         class FolderInfo
         {
             public string Name = "";
             public string Sha = "";
+            public string LastCommitDate = "";
+            public string LastCommitMessage = "";
         }
 
         // 資料夾比對結果（已不於更新流程使用）
@@ -352,7 +513,7 @@ namespace InstallerWinForms
                 var treeResp = await client.GetStringAsync(treeUrl);
                 using var treeDoc = JsonDocument.Parse(treeResp);
                 if (!treeDoc.RootElement.TryGetProperty("tree", out var tree)) return folders;
-                var addonsPatterns = new[] { "Interface/AddOns/", "AddOns/" };
+                var addonsPatterns = new[] { "Interface/AddOns", "AddOns" };
                 var folderShas = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var node in tree.EnumerateArray())
                 {
@@ -364,30 +525,76 @@ namespace InstallerWinForms
                     {
                         var idx = path.IndexOf(pattern, StringComparison.OrdinalIgnoreCase);
                         if (idx < 0) continue;
-                        var rest = path.Substring(idx + pattern.Length);
+                        var rest = path.Substring(idx + pattern.Length).TrimStart('/');
                         var parts = rest.Split('/');
-                        if (parts.Length >= 1 && !string.IsNullOrEmpty(parts[0]))
+                        if (parts.Length == 1 && !string.IsNullOrEmpty(parts[0]))
                         {
                             var folderName = parts[0];
-                            if (parts.Length == 1)
-                            {
-                                if (!folderShas.ContainsKey(folderName)) folderShas[folderName] = sha;
-                            }
+                            if (!folderShas.ContainsKey(folderName)) folderShas[folderName] = sha;
                         }
                         break;
                     }
                 }
+                var maxConcurrent = string.IsNullOrWhiteSpace(token) ? 3 : 10;
+                var semaphore = new SemaphoreSlim(maxConcurrent);
+                var tasks = new List<Task<FolderInfo>>();
                 foreach (var kvp in folderShas)
                 {
-                    folders.Add(new FolderInfo { Name = kvp.Key, Sha = kvp.Value });
+                    await semaphore.WaitAsync();
+                    var folderName = kvp.Key;
+                    var folderSha = kvp.Value;
+                    tasks.Add(Task.Run(async () =>
+                    {
+                        try
+                        {
+                            string commitDate = "";
+                            string commitMessage = "";
+                            foreach (var prefix in new[] { "AddOns", "Interface/AddOns" })
+                            {
+                                try
+                                {
+                                    var folderPath = prefix + "/" + folderName;
+                                    var commitUrl = "https://api.github.com/repos/WOWRainbowUI/RainbowUI-Retail/commits?path=" + folderPath + "&per_page=1&sha=" + branch;
+                                    var commitResp = await client.GetStringAsync(commitUrl);
+                                    using var commitDoc = JsonDocument.Parse(commitResp);
+                                    if (commitDoc.RootElement.ValueKind == JsonValueKind.Array && commitDoc.RootElement.GetArrayLength() > 0)
+                                    {
+                                        var lastCommit = commitDoc.RootElement[0];
+                                        var commit = lastCommit.GetProperty("commit");
+                                        var committer = commit.GetProperty("committer");
+                                        var dateStr = committer.TryGetProperty("date", out var dateEl) ? (dateEl.GetString() ?? "") : "";
+                                        if (DateTime.TryParse(dateStr, out var dt)) commitDate = dt.ToLocalTime().ToString("yyyy/MM/dd HH:mm");
+                                        var fullMessage = commit.TryGetProperty("message", out var msgEl) ? (msgEl.GetString() ?? "") : "";
+                                        if (!string.IsNullOrEmpty(fullMessage))
+                                        {
+                                            var lines = fullMessage.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                                            commitMessage = lines.Length > 0 ? lines[0] : fullMessage;
+                                            if (commitMessage.Length > 60) commitMessage = commitMessage.Substring(0, 57) + "...";
+                                        }
+                                        break;
+                                    }
+                                }
+                                catch
+                                {
+                                }
+                            }
+                            return new FolderInfo { Name = folderName, Sha = folderSha, LastCommitDate = commitDate, LastCommitMessage = commitMessage };
+                        }
+                        finally
+                        {
+                            semaphore.Release();
+                        }
+                    }));
                 }
+                var results = await Task.WhenAll(tasks);
+                folders.AddRange(results);
             }
             catch
             {
                 var names = await GetRemoteAddOnDirs(branch, token);
                 foreach (var name in names)
                 {
-                    folders.Add(new FolderInfo { Name = name, Sha = "" });
+                    folders.Add(new FolderInfo { Name = name, Sha = "", LastCommitDate = "", LastCommitMessage = "" });
                 }
             }
             return folders;
@@ -428,7 +635,7 @@ namespace InstallerWinForms
         }
 
         // 下載單一 UI 資料夾：先嘗試 AddOns/<name>，若無則改用 Interface/AddOns/<name>
-        static async Task DownloadFolder(string folderName, string branch, string addonsPath, string? token, Action<int> onProgress, Action<string> onLog)
+        static async Task DownloadFolder(string folderName, string branch, string addonsPath, string? token, Action<int> onProgress, Action<string> onLog, Action<double, int, int>? onSpeed = null, int bufferSizeKB = 8, int timeoutSeconds = 30)
         {
             var folderPath = "AddOns/" + folderName;
             var files = await GetFolderFilesRecursive(folderPath, branch, token);
@@ -442,8 +649,10 @@ namespace InstallerWinForms
                 onLog("資料夾無檔案: " + folderName);
                 return;
             }
-            using var client = CreateGitHubHttpClient(token);
+            using var client = CreateGitHubHttpClient(token, timeoutSeconds);
             int downloaded = 0;
+            var sw = Stopwatch.StartNew();
+            long totalBytes = 0;
             foreach (var file in files)
             {
                 try
@@ -458,10 +667,18 @@ namespace InstallerWinForms
                     var ddir = Path.GetDirectoryName(dest);
                     if (!string.IsNullOrEmpty(ddir) && !Directory.Exists(ddir)) Directory.CreateDirectory(ddir);
                     using var fs = new FileStream(dest, FileMode.Create, FileAccess.Write, FileShare.None);
-                    await stream.CopyToAsync(fs);
+                    var buffer = new byte[Math.Max(1024, bufferSizeKB * 1024)];
+                    int read;
+                    while ((read = await stream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                    {
+                        await fs.WriteAsync(buffer, 0, read);
+                        totalBytes += read;
+                    }
                     downloaded++;
                     var pct = (int)(downloaded * 100 / files.Count);
                     onProgress(pct);
+                    var speedMBps = totalBytes / Math.Max(sw.Elapsed.TotalSeconds, 0.001) / 1048576.0;
+                    onSpeed?.Invoke(speedMBps, downloaded, files.Count);
                 }
                 catch (Exception ex)
                 {
@@ -483,7 +700,7 @@ namespace InstallerWinForms
             return addons;
         }
 
-        // 更新流程：首次安裝整包下載；非首次安裝僅下載缺失資料夾
+        // 更新流程：統一使用增量更新（分析缺失資料夾並逐一下載）
         async Task RunUpdateFlow()
         {
             try
@@ -501,172 +718,121 @@ namespace InstallerWinForms
                 var basePath = wowPath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? (Path.GetDirectoryName(wowPath) ?? wowPath) : wowPath;
                 var interfaceDir = Path.Combine(Path.Combine(basePath, "_retail_"), "Interface");
                 Directory.CreateDirectory(interfaceDir);
-                var isFirstInstall = string.IsNullOrEmpty(config.InstalledCommitSha);
-                if (isFirstInstall)
+                // 統一：分析缺失資料夾並逐一下載
+                statusLabel.ForeColor = Color.Orange;
+                statusLabel.Text = "正在分析需要更新的資料夾...";
+                progressBar.Value = 5;
+
+                var remoteFolders = await GetAddOnsFoldersWithSha(branch, token);
+
+                var localDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                if (Directory.Exists(addonsPath))
                 {
-                    // 首次安裝：下載 ZIP、解壓、鏡像複製至 AddOns
-                    var zipName = "rainbowui-retail-" + branch + ".zip";
-                    var zipPath = Path.Combine(interfaceDir, zipName);
-                    try
+                    foreach (var dir in Directory.GetDirectories(addonsPath))
                     {
-                        statusLabel.Text = strings.StatusDownloading;
-                        progressBar.Value = 0;
-                        var lastPct = -1;
-                        await DownloadZipWithProgress(branch, zipPath,
-                            p => {
-                                var pct = Math.Max(0, Math.Min(100, p));
-                                progressBar.Value = (int)(pct * 0.4);
-                                if (pct - lastPct >= 5) { lastPct = pct; Log(string.Format(strings.LogDownloading, pct)); }
-                            },
-                            (read, total, speed) => {
-                                var mbps = speed / 1048576.0;
-                                var readMb = read / 1048576.0;
-                                var effectiveTotal = total > 0 ? Math.Max(total, 251658240L) : 251658240L;
-                                var totalMb = effectiveTotal / 1048576.0;
-                                string info;
-                                if (speed > 0)
-                                {
-                                    var remainingBytes = Math.Max(0, effectiveTotal - read);
-                                    var eta = TimeSpan.FromSeconds(remainingBytes / speed).ToString(@"mm\:ss");
-                                    info = string.Format(strings.DownloadInfo, mbps.ToString("0.00"), eta, readMb.ToString("0.0"), totalMb.ToString("0.0"));
-                                }
-                                else
-                                {
-                                    info = string.Format(strings.DownloadInfoUnknown, mbps.ToString("0.00"), readMb.ToString("0.0"));
-                                }
-                                downloadInfoLabel.Visible = true;
-                                downloadInfoLabel.Text = info;
-                            });
-                        downloadInfoLabel.Visible = false;
-                        statusLabel.Text = strings.StatusExtracting;
-                        var extractDir = Path.Combine(interfaceDir, "rainbowui-extract-" + branch);
-                        Directory.CreateDirectory(extractDir);
-                        await Task.Run(() => ExtractZipCompatWithProgress(zipPath, extractDir, p => progressBar.Value = 40 + (int)(Math.Max(0, Math.Min(100, p)) * 0.3), entry => Log(string.Format(strings.LogExtractingEntry, entry))));
-                        var root = FindExtractedRoot(extractDir, branch);
-                        var src = GetCopySource(root);
-                        statusLabel.Text = strings.StatusCopying;
-                        var stats = await Task.Run(() => MirrorCopyWithProgress(src, addonsPath, p => progressBar.Value = 70 + (int)(Math.Max(0, Math.Min(100, p)) * 0.3), line => { Log(line); Application.DoEvents(); }, strings));
-                        dynamic latest = new { sha = "", commit = new { committer = new { date = "" }, message = "" } };
-                        try { latest = await GetLatestCommit(branch, token); } catch { }
-                        var latestSha = ""; try { latestSha = latest.sha; } catch { }
-                        if (!string.IsNullOrEmpty(latestSha)) config.InstalledCommitSha = latestSha;
-                        var dateStr2 = ""; try { dateStr2 = latest.commit.committer.date; } catch { }
-                        if (!string.IsNullOrEmpty(dateStr2)) config.InstalledCommitDate = dateStr2;
-                        var commitMsg2 = ""; try { commitMsg2 = latest.commit.message; } catch { }
-                        if (!string.IsNullOrEmpty(commitMsg2))
-                        {
-                            config.InstalledCommitMessage = commitMsg2;
-                            var firstBreakN2 = commitMsg2.IndexOf('\n');
-                            var firstBreakR2 = commitMsg2.IndexOf('\r');
-                            var idx2 = firstBreakN2 >= 0 && firstBreakR2 >= 0 ? Math.Min(firstBreakN2, firstBreakR2) : Math.Max(firstBreakN2, firstBreakR2);
-                            var firstLine2 = idx2 >= 0 ? commitMsg2.Substring(0, idx2) : commitMsg2;
-                            Log(strings.LogCommitMessage + firstLine2);
-                        }
-                        config.Save(Path.Combine(AppContext.BaseDirectory, "rainbow_config.json"));
-                        progressBar.Value = 100;
-                        statusLabel.Text = strings.StatusCompleted;
-                        var folders = string.Join(", ", stats.UpdatedDirs);
-                        Log(string.Format(strings.LogSummary, stats.Added, stats.Updated, stats.Deleted, folders));
-                    }
-                    finally
-                    {
-                        try { if (File.Exists(zipPath)) File.Delete(zipPath); } catch { }
-                        try { var ed = Path.Combine(interfaceDir, "rainbowui-extract-" + branch); if (Directory.Exists(ed)) Directory.Delete(ed, true); } catch { }
+                        var name = Path.GetFileName(dir);
+                        if (!string.IsNullOrEmpty(name)) localDirs.Add(name);
                     }
                 }
-                else
+
+                var missingFolders = new List<string>();
+                foreach (var remote in remoteFolders)
                 {
-                    // 非首次安裝：分析缺失資料夾並逐一下載
-                    statusLabel.ForeColor = Color.Orange;
-                    statusLabel.Text = "正在分析需要更新的資料夾...";
-                    progressBar.Value = 5;
+                    if (!localDirs.Contains(remote.Name)) missingFolders.Add(remote.Name);
+                }
 
-                    var remoteFolders = await GetAddOnsFoldersWithSha(branch, token);
-
-                    var localDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    if (Directory.Exists(addonsPath))
-                    {
-                        foreach (var dir in Directory.GetDirectories(addonsPath))
-                        {
-                            var name = Path.GetFileName(dir);
-                            if (!string.IsNullOrEmpty(name)) localDirs.Add(name);
-                        }
-                    }
-
-                    var missingFolders = new List<string>();
-                    foreach (var remote in remoteFolders)
-                    {
-                        if (!localDirs.Contains(remote.Name)) missingFolders.Add(remote.Name);
-                    }
-
-                    if (missingFolders.Count == 0)
-                    {
-                        statusLabel.ForeColor = Color.Green;
-                        statusLabel.Text = strings.StatusUpToDateAll;
-                        progressBar.Value = 100;
-                        Log("【✅ 已是最新】所有 UI 資料夾都已存在");
-                        await RunInitialCheck();
-                        return;
-                    }
-
-                    Log($"【📥 開始下載】需要下載 {missingFolders.Count} 個缺失的資料夾");
-
-                    statusLabel.Text = $"正在下載與移動 {missingFolders.Count} 個資料夾...";
-                    downloadInfoLabel.Visible = true;
-
-                    int completed = 0;
-                    var sw = Stopwatch.StartNew();
-
-                    foreach (var folderName in missingFolders)
-                    {
-                        var folderProgress = (int)((completed * 100.0) / Math.Max(1, missingFolders.Count));
-                        progressBar.Value = Math.Max(0, Math.Min(100, folderProgress));
-
-                        downloadInfoLabel.Text = $"下載中: {folderName} ({completed + 1}/{missingFolders.Count})";
-                        Application.DoEvents();
-
-                        await DownloadFolder(
-                            folderName,
-                            branch,
-                            addonsPath,
-                            token,
-                            pct => { },
-                            msg => Log(msg)
-                        );
-
-                        completed++;
-                    }
-
-                    sw.Stop();
-                    downloadInfoLabel.Visible = false;
-
-                    dynamic latest = new { sha = "", commit = new { committer = new { date = "" }, message = "" } };
-                    try { latest = await GetLatestCommit(branch, token); } catch { }
-
-                    var latestSha = ""; try { latestSha = latest.sha; } catch { }
-                    if (!string.IsNullOrEmpty(latestSha)) config.InstalledCommitSha = latestSha;
-
-                    var dateStr = ""; try { dateStr = latest.commit.committer.date; } catch { }
-                    if (!string.IsNullOrEmpty(dateStr)) config.InstalledCommitDate = dateStr;
-
-                    var commitMsg = ""; try { commitMsg = latest.commit.message; } catch { }
-                    if (!string.IsNullOrEmpty(commitMsg))
-                    {
-                        config.InstalledCommitMessage = commitMsg;
-                        var firstLine = commitMsg.Split('\n', '\r')[0];
-                        Log(strings.LogCommitMessage + firstLine);
-                    }
-
-                    config.Save(Path.Combine(AppContext.BaseDirectory, "rainbow_config.json"));
-
-                    progressBar.Value = 100;
-                    statusLabel.Text = strings.StatusCompleted;
+                if (missingFolders.Count == 0)
+                {
                     statusLabel.ForeColor = Color.Green;
-
-                    Log($"【✅ 下載完成】成功下載 {completed} 個資料夾，耗時 {sw.Elapsed.TotalSeconds:F1} 秒");
-
+                    statusLabel.Text = strings.StatusUpToDateAll;
+                    progressBar.Value = 100;
+                    Log("【✅ 已是最新】所有 UI 資料夾都已存在");
                     await RunInitialCheck();
+                    return;
                 }
+
+                Log($"【📥 開始下載】需要下載 {missingFolders.Count} 個缺失的資料夾");
+
+                statusLabel.Text = $"正在下載與移動 {missingFolders.Count} 個資料夾...";
+                downloadInfoLabel.Visible = true;
+
+                int completed = 0;
+                var sw = Stopwatch.StartNew();
+
+                var tasks = new List<Task>();
+                var maxParallel = Math.Max(1, config.ParallelDownloads);
+                var semaphore = new SemaphoreSlim(maxParallel);
+                Log($"使用並行下載數：{maxParallel}");
+
+                foreach (var folderName in missingFolders)
+                {
+                    await semaphore.WaitAsync();
+                    var localFolderName = folderName;
+                    tasks.Add(Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await DownloadFolder(
+                                localFolderName,
+                                branch,
+                                addonsPath,
+                                token,
+                                pct => { },
+                                msg => Log(msg),
+                                (speedMBps, done, total) =>
+                                {
+                                    this.Invoke(new Action(() =>
+                                    {
+                                        downloadInfoLabel.Text = $"下載中: {localFolderName} ({done}/{total}) | 速度: {speedMBps:F2} MB/s";
+                                    }));
+                                },
+                                Math.Max(4, config.BufferSizeKB),
+                                Math.Max(10, config.ConnectionTimeout)
+                            );
+                        }
+                        finally
+                        {
+                            Interlocked.Increment(ref completed);
+                            this.Invoke(new Action(() =>
+                            {
+                                var folderProgress = (int)((completed * 100.0) / Math.Max(1, missingFolders.Count));
+                                progressBar.Value = Math.Max(0, Math.Min(100, folderProgress));
+                            }));
+                            semaphore.Release();
+                        }
+                    }));
+                }
+
+                await Task.WhenAll(tasks);
+
+                sw.Stop();
+                downloadInfoLabel.Visible = false;
+
+                dynamic latest = new { sha = "", commit = new { committer = new { date = "" }, message = "" } };
+                try { latest = await GetLatestCommit(branch, token); } catch { }
+
+                var latestSha = ""; try { latestSha = latest.sha; } catch { }
+                if (!string.IsNullOrEmpty(latestSha)) config.InstalledCommitSha = latestSha;
+
+                var dateStr = ""; try { dateStr = latest.commit.committer.date; } catch { }
+                if (!string.IsNullOrEmpty(dateStr)) config.InstalledCommitDate = dateStr;
+
+                var commitMsg = ""; try { commitMsg = latest.commit.message; } catch { }
+                if (!string.IsNullOrEmpty(commitMsg))
+                {
+                    config.InstalledCommitMessage = commitMsg;
+                    var firstLine = commitMsg.Split('\n', '\r')[0];
+                    Log(strings.LogCommitMessage + firstLine);
+                }
+
+                config.Save(Path.Combine(AppContext.BaseDirectory, "rainbow_config.json"));
+
+                progressBar.Value = 100;
+                statusLabel.Text = strings.StatusCompleted;
+                statusLabel.ForeColor = Color.Green;
+
+                Log($"【✅ 下載完成】成功下載 {completed} 個資料夾，耗時 {sw.Elapsed.TotalSeconds:F1} 秒");
+
                 await RunInitialCheck();
             }
             catch (Exception ex)
@@ -711,10 +877,12 @@ namespace InstallerWinForms
         }
 
         // 建立 GitHub API 用的 HttpClient（TLS1.2、User-Agent、可選 Authorization）
-        static HttpClient CreateGitHubHttpClient(string? token = null)
+        static HttpClient CreateGitHubHttpClient(string? token = null, int timeoutSeconds = 30)
         {
-            var handler = new HttpClientHandler { SslProtocols = SslProtocols.Tls12 };
-            var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(30) };
+            var handler = new HttpClientHandler { SslProtocols = SslProtocols.Tls12, MaxConnectionsPerServer = 20 };
+            var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(timeoutSeconds) };
+            client.DefaultRequestVersion = new Version(2, 0);
+            client.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrHigher;
             client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("RainbowUIInstaller", "1.0"));
             if (!string.IsNullOrWhiteSpace(token)) client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
             return client;
@@ -1323,7 +1491,12 @@ namespace InstallerWinForms
                 var token = config.GitHubToken;
                 var branch = await GetDefaultBranch(token);
 
+                statusLabel.Text = "正在檢查 GitHub 更新資訊（可能需要 10-30 秒）...";
+                Log("開始獲取各組件的最後更新時間...");
+
                 var remoteFolders = await GetAddOnsFoldersWithSha(branch, token);
+
+                Log($"已獲取 {remoteFolders.Count} 個組件的更新資訊");
 
                 var localDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 if (Directory.Exists(addonsPath))
@@ -1349,7 +1522,6 @@ namespace InstallerWinForms
                 foreach (var folder in remoteFolders.OrderBy(f => f.Name))
                 {
                     var item = new ListViewItem(folder.Name);
-
                     if (missingFolders.Contains(folder.Name))
                     {
                         item.SubItems.Add(strings.StatusItemNeedUpdate);
@@ -1360,7 +1532,8 @@ namespace InstallerWinForms
                         item.SubItems.Add(strings.StatusItemUpToDate);
                         item.ForeColor = Color.Green;
                     }
-
+                    item.SubItems.Add(folder.LastCommitDate);
+                    item.SubItems.Add(folder.LastCommitMessage);
                     componentsList.Items.Add(item);
                 }
 
@@ -1446,13 +1619,16 @@ namespace InstallerWinForms
     }
 
     // 使用者設定：路徑、已安裝提交資訊、GitHub Token
-    public class Config
-    {
-        public string? WowPath { get; set; }
-        public string? InstalledCommitSha { get; set; }
-        public string? InstalledCommitDate { get; set; }
-        public string? InstalledCommitMessage { get; set; }
-        public string? GitHubToken { get; set; }
+        public class Config
+        {
+            public string? WowPath { get; set; }
+            public string? InstalledCommitSha { get; set; }
+            public string? InstalledCommitDate { get; set; }
+            public string? InstalledCommitMessage { get; set; }
+            public string? GitHubToken { get; set; }
+            public int ParallelDownloads { get; set; } = 3;
+            public int BufferSizeKB { get; set; } = 8;
+            public int ConnectionTimeout { get; set; } = 30;
 
         public static Config Load(string path)
         {
