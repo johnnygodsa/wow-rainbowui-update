@@ -1,0 +1,7 @@
+﻿# 排除編譯輸出
+**/bin/
+**/obj/
+**/publish/
+*.exe
+*.dll
+*.pdb
